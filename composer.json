@@ -1,0 +1,32 @@
+{
+  "name": "eidcloud/json-db",
+  "description": "Embedded JSON document database with indexing, ACID transactions, and fluent query builder in pure PHP",
+  "type": "library",
+  "license": "MIT",
+  "authors": [
+    {
+      "name": "MHD. Shadi AL-Hasan",
+      "role": "Author & Maintainer"
+    }
+  ],
+  "require": {
+    "php": ">=8.2"
+  },
+  "autoload": {
+    "psr-4": {
+      "EidCloud\\JsonDb\\": "src/"
+    }
+  },
+  "bin": [
+    "bin/eidcloud-json-db"
+  ],
+  "keywords": [
+    "eidcloud",
+    "json-database",
+    "nosql",
+    "embedded-database",
+    "acid-transactions",
+    "query-builder",
+    "php8"
+  ]
+}

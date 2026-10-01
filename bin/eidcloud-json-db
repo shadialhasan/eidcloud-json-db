@@ -1,0 +1,203 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+// Register zero-dependency PSR-4 autoloader for EidCloud\JsonDb
+spl_autoload_register(function ($class) {
+    $prefix = 'EidCloud\\JsonDb\\';
+    $baseDir = dirname(__DIR__) . '/src/';
+
+    $len = strlen($prefix);
+    if (strncmp($prefix, $class, $len) !== 0) {
+        return;
+    }
+
+    $relativeClass = substr($class, $len);
+    $file = $baseDir . str_replace('\\', '/', $relativeClass) . '.php';
+
+    if (file_exists($file)) {
+        require_once $file;
+    }
+});
+
+use EidCloud\JsonDb\Database;
+use EidCloud\JsonDb\Sql\SqlParser;
+
+$args = array_slice($argv, 1);
+
+function showHelp(): void
+{
+    echo <<<HELP
+🗄️ EidCloud JSON DB CLI v1.0.0
+Zero-dependency embedded JSON document database with indexing, ACID transactions, and query builder.
+
+Usage:
+  eidcloud-json-db <command> [options] [arguments]
+
+Commands:
+  query <db_path> "<sql_query>"   Execute a SQL-like query against JSON database collections
+  benchmark [options]             Run performance benchmarks (inserts, index vs scan queries)
+
+Options:
+  -h, --help                      Display this help message
+  --json                          Output results formatted as JSON
+  --records=<num>                 Number of records for benchmark (default: 5000)
+
+Examples:
+  php bin/eidcloud-json-db query ./data "SELECT * FROM users WHERE status = 'active'"
+  php bin/eidcloud-json-db query ./data "SELECT id, name, age FROM users WHERE age > 25 ORDER BY age DESC LIMIT 5"
+  php bin/eidcloud-json-db benchmark --records=10000
+  php bin/eidcloud-json-db benchmark --records=5000 --json
+
+HELP;
+}
+
+if (empty($args) || in_array('-h', $args, true) || in_array('--help', $args, true)) {
+    showHelp();
+    exit(0);
+}
+
+$isJson = in_array('--json', $args, true);
+$cleanArgs = array_values(array_filter($args, fn($a) => $a !== '--json'));
+
+$command = $cleanArgs[0] ?? '';
+
+switch ($command) {
+    case 'query':
+        if (count($cleanArgs) < 3) {
+            if ($isJson) {
+                echo json_encode(['error' => 'Missing arguments: query <db_path> "<sql>"'], JSON_PRETTY_PRINT) . PHP_EOL;
+            } else {
+                echo "Error: Missing arguments.\nUsage: php bin/eidcloud-json-db query <db_path> \"<sql>\"\n";
+            }
+            exit(1);
+        }
+
+        $dbPath = $cleanArgs[1];
+        $sql = $cleanArgs[2];
+
+        try {
+            $db = new Database($dbPath);
+            $parser = new SqlParser($db);
+            $results = $parser->query($sql);
+
+            if ($isJson) {
+                echo json_encode([
+                    'status' => 'success',
+                    'count' => count($results),
+                    'data' => $results,
+                ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+            } else {
+                echo "Found " . count($results) . " matching record(s):\n";
+                if (empty($results)) {
+                    echo "  (No records)\n";
+                } else {
+                    foreach ($results as $idx => $row) {
+                        echo "  [" . ($idx + 1) . "] " . json_encode($row, JSON_UNESCAPED_SLASHES) . "\n";
+                    }
+                }
+            }
+        } catch (\Throwable $e) {
+            if ($isJson) {
+                echo json_encode(['status' => 'error', 'message' => $e->getMessage()], JSON_PRETTY_PRINT) . PHP_EOL;
+            } else {
+                echo "Error: " . $e->getMessage() . PHP_EOL;
+            }
+            exit(1);
+        }
+        break;
+
+    case 'benchmark':
+        $records = 5000;
+        foreach ($args as $arg) {
+            if (preg_match('/^--records=(\d+)$/', $arg, $m)) {
+                $records = (int)$m[1];
+            }
+        }
+
+        $benchDir = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'eidcloud_bench_' . bin2hex(random_bytes(4));
+        try {
+            $db = new Database($benchDir);
+            $users = $db->table('benchmark_users');
+            $users->createIndex('status');
+            $users->createIndex(['status', 'country']);
+
+            // 1. Benchmark Bulk Insert in Transaction
+            $t0 = microtime(true);
+            $statuses = ['active', 'pending', 'suspended', 'archived'];
+            $countries = ['US', 'DE', 'FR', 'UK', 'JP', 'CA', 'SY', 'AE'];
+
+            $batch = [];
+            for ($i = 1; $i <= $records; $i++) {
+                $batch[] = [
+                    'name' => "User_{$i}",
+                    'email' => "user{$i}@eidcloud.test",
+                    'status' => $statuses[$i % count($statuses)],
+                    'country' => $countries[$i % count($countries)],
+                    'age' => 18 + ($i % 60),
+                    'created_at' => date('Y-m-d H:i:s', 1700000000 + $i * 60)
+                ];
+            }
+            $users->insertMany($batch);
+            $insertDuration = microtime(true) - $t0;
+            $insertRps = round($records / max(0.0001, $insertDuration), 2);
+
+            // 2. Benchmark Indexed Query
+            $t1 = microtime(true);
+            $indexedResults = $users->where('status', '=', 'active')->get();
+            $indexedDuration = (microtime(true) - $t1) * 1000; // ms
+
+            // 3. Benchmark Compound Indexed Query
+            $t2 = microtime(true);
+            $compoundResults = $users->where('status', '=', 'active')->where('country', '=', 'US')->get();
+            $compoundDuration = (microtime(true) - $t2) * 1000; // ms
+
+            // 4. Benchmark Full Scan Query (unindexed field)
+            $t3 = microtime(true);
+            $scanResults = $users->where('name', '=', "User_" . (int)($records / 2))->get();
+            $scanDuration = (microtime(true) - $t3) * 1000; // ms
+
+            // 5. Memory Usage
+            $memPeak = round(memory_get_peak_usage(true) / 1024 / 1024, 2);
+
+            if ($isJson) {
+                echo json_encode([
+                    'status' => 'success',
+                    'records' => $records,
+                    'insert_time_sec' => round($insertDuration, 4),
+                    'insert_records_per_sec' => $insertRps,
+                    'indexed_query_ms' => round($indexedDuration, 4),
+                    'indexed_count' => count($indexedResults),
+                    'compound_query_ms' => round($compoundDuration, 4),
+                    'compound_count' => count($compoundResults),
+                    'unindexed_scan_ms' => round($scanDuration, 4),
+                    'unindexed_count' => count($scanResults),
+                    'memory_peak_mb' => $memPeak,
+                ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+            } else {
+                echo "🚀 EidCloud JSON DB Benchmark Results ({$records} records):\n";
+                echo "---------------------------------------------------------\n";
+                echo "⚡ Bulk Insert (Transaction): " . round($insertDuration, 4) . " s ({$insertRps} ops/sec)\n";
+                echo "⚡ Indexed Search (status='active'): " . round($indexedDuration, 4) . " ms (" . count($indexedResults) . " found)\n";
+                echo "⚡ Compound Indexed (status='active' AND country='US'): " . round($compoundDuration, 4) . " ms (" . count($compoundResults) . " found)\n";
+                echo "🔍 Unindexed Scan (name='...'): " . round($scanDuration, 4) . " ms (" . count($scanResults) . " found)\n";
+                echo "💾 Peak Memory Usage: {$memPeak} MB\n";
+                echo "---------------------------------------------------------\n";
+            }
+        } finally {
+            // Cleanup benchmark temp dir
+            $files = glob($benchDir . '/*');
+            if ($files) {
+                foreach ($files as $f) {
+                    @unlink($f);
+                }
+            }
+            @rmdir($benchDir);
+        }
+        break;
+
+    default:
+        echo "Unknown command: '{$command}'. Run 'eidcloud-json-db --help' for usage.\n";
+        exit(1);
+}

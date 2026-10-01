@@ -1,0 +1,12 @@
+{
+  "description": "Embedded JSON document database with indexing, ACID transactions, and fluent query builder in pure PHP",
+  "topics": [
+    "eidcloud",
+    "json-database",
+    "nosql",
+    "embedded-database",
+    "acid-transactions",
+    "query-builder",
+    "php8"
+  ]
+}
